@@ -7,13 +7,37 @@ from typing import Any, Dict, Optional
 
 import xmltodict
 from requests import Session
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, wait_random
 
 from target_sherpaan.auth import SherpaAuth
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("requests").setLevel(logging.WARNING)
+
+_DEFAULT_STOP = stop_after_attempt(3)
+_DEFAULT_WAIT = wait_exponential(multiplier=1, min=4, max=10)
+_PURCHASE_LOCK_STOP = stop_after_attempt(5)
+_PURCHASE_LOCK_WAIT = wait_exponential(multiplier=5) + wait_random(0, 1)
+
+
+def _is_purchase_lock(retry_state):
+    error = retry_state.outcome.exception()
+    return isinstance(error, ValueError) and str(error) == (
+        "SOAP Fault from ChangePurchase2: Purchase order is locked"
+    )
+
+
+def _soap_stop(retry_state):
+    # Total attempts, not per-fault counters, bound mixed-fault sequences too.
+    policy = _PURCHASE_LOCK_STOP if _is_purchase_lock(retry_state) else _DEFAULT_STOP
+    return policy(retry_state)
+
+
+def _soap_wait(retry_state):
+    policy = _PURCHASE_LOCK_WAIT if _is_purchase_lock(retry_state) else _DEFAULT_WAIT
+    return policy(retry_state)
+
 
 
 class SherpaClient:
@@ -43,8 +67,8 @@ class SherpaClient:
         self.logger = logging.getLogger(__name__)
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10)
+        stop=_soap_stop,
+        wait=_soap_wait
     )
     def call_soap_service(
         self,
